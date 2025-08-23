@@ -8,19 +8,15 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-import requests
 import smtplib
 import time
 import os
 import cv2
 import pickle
-import hashlib
 import base64
 from datetime import datetime, timedelta
 from PIL import Image, ImageChops
 import io
-import base64
-import pyautogui
 
 class GoatMonitor:
     def __init__(self, email_user, email_password, recipient_email):
@@ -137,4 +133,5 @@ def main():
     monitor.run(driver)
 
 if __name__ == "__main__":
+
     main()
