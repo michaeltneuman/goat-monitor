@@ -32,12 +32,15 @@ class GoatMonitor:
         self.images_dir = os.path.join("goat_monitor", "images")
         self.images_goats_dir = os.path.join(self.images_dir, "goats")
         self.images_nogoats_dir = os.path.join(self.images_dir, "nogoats")
-        self.last_notification = {}
+
+    def get_best_score(self):
+        try:
+            with open('best_score.txt','r') as _:
+                return float(_.read())
+        except:
+            return 0
     
     def train_model(self):
-        iterations = 1000000
-        test_size = 0.1
-        random_state=random.randint(1,999999)
         DATA_DIRS = {"goats": self.images_goats_dir,"no_goats":self.images_nogoats_dir}
         def load_images():
             X, y = [], []
@@ -53,13 +56,31 @@ class GoatMonitor:
             return np.array(X), np.array(y)
         logging.info("Training model, loading images...")
         X, y = load_images()
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, stratify=y, random_state=random_state)
-        logging.info(f"Model split determined, performing {iterations} iterations")
-        clf = SGDClassifier(loss="hinge",max_iter=iterations, tol=1e-7)
-        clf.fit(X_train, y_train)
-        logging.info(classification_report(y_test, clf.predict(X_test), target_names=["no_goats", "goats"]))
-        with open("goat_classifier.pkl", "wb") as f:
-            pickle.dump(clf, f)
+        for iterations in (1000000,2000000,2500000):
+            for test_size in (0.1,0.2):
+                random_state=random.randint(1,999999)
+                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, stratify=y, random_state=random_state)
+                logging.info(f"Model split determined, performing {iterations} iterations on test_size {test_size}")
+                clf = SGDClassifier(loss="hinge",max_iter=iterations, tol=1e-7)
+                clf.fit(X_train, y_train)
+                report = classification_report(y_test, clf.predict(X_test), target_names=["no_goats", "goats"],output_dict=True)
+                logging.info(report)
+                score_of_model = (float(report["goats"]["recall"])+
+                float(report["no_goats"]["recall"])+
+                float(report["goats"]["precision"])+
+                float(report["no_goats"]["precision"])+
+                float(report["accuracy"]))
+                if score_of_model > self.get_best_score():
+                    logging.info("NEW BEST SCORE, SAVING MODEL!")
+                    with open('best_score.txt','w') as _:
+                        _.write(str(score_of_model))
+                        _.flush()
+                    with open("goat_classifier.pkl", "wb") as f:
+                        pickle.dump(clf, f)
+                else:
+                    logging.info("BAD SCORE, SKIPPING MODEL...")
+                del clf
+                del report
     
     def get_image_from_webpage(self, url,driver):
         try:
@@ -112,15 +133,8 @@ To: {self.recipient_email}
             print(f"Email notification sent for camera {cam_id}")
         except Exception as e:
             logging.error(f"Error sending email: {e}")
-    
-    def should_send_notification(self, cam_id):
-        try:
-            return cam_id not in self.last_notification and ((datetime.now() - self.last_notification[cam_id]).total_seconds() >= 600)
-        except Exception as e:
-            logging.warning(f"Error determining if should send notification, returning True by default: {e}")
-            return True
-    
-    def check_camera(self, cam_id, url,driver):
+        
+    def check_camera(self, cam_id, url,driver,last_detection_time):
         logging.info(f"Checking camera {cam_id}: {url}")
         current_image, img_url = self.get_image_from_webpage(url,driver)
         if current_image is None:
@@ -133,11 +147,10 @@ To: {self.recipient_email}
         img = img.flatten().reshape(1, -1)
         if clf.predict(img)[0] == 1:
             logging.info("Goats detected based on model!")
-            if self.should_send_notification(cam_id):
+            if datetime.now() + timedelta(minutes=-15) > last_detection_time:
                 self.send_notification(cam_id, url, saved_path)
-                self.last_notification[cam_id] = datetime.now()
-            return True
-        return False
+                return datetime.now()
+        return last_detection_time
     
     def get_image_count(self):
         return sum(len(os.listdir(d)) for d in ["goat_monitor/images/goats","goat_monitor/images/nogoats"])
@@ -145,32 +158,27 @@ To: {self.recipient_email}
     def run(self, driver):
         image_count = self.get_image_count()
         self.train_model()
+        last_detection_time = datetime.now()
         while True:
             try:
                 # once getting closer to opening time, sleep less to ensure gettng 7AM capture
                 if datetime.now().hour >= 6  and datetime.now().hour < 15:
                     # Al Johnson's hours are 7AM to 3PM CENTRAL TIME where the script is run
                     if datetime.now().hour >= 7:
-                        goats_detected = False
                         for i, url in enumerate(self.webcam_urls, 1):
-                            goats_detected_from_camera = self.check_camera(i, url, driver)
-                            goats_detected = True if goats_detected else goats_detected_from_camera
-                        next_detection_time = datetime.now()+timedelta(minutes=5)
-                        if goats_detected:
-                            logging.info("Goats detected, only waiting 1 minute to get more images")
-                            time.sleep(60)
-                        else:
-                            logging.info("Waiting 1 minutes for next check...")
-                            time.sleep(60)
-                            curr_image_count = self.get_image_count()
-                            logging.info(f"{image_count} IMAGES TRAINED | {curr_image_count} IMAGES TOTAL")
-                            if curr_image_count > image_count:
-                                self.train_model()
-                                image_count = curr_image_count
-                            sleep_timer = (next_detection_time-datetime.now()).total_seconds()
-                            logging.info(f"Waiting {sleep_timer} seconds for next check...")
-                            time.sleep(sleep_timer)
-                            del curr_image_count
+                            last_detection_time = self.check_camera(i, url, driver,last_detection_time)
+                        next_detection_time = datetime.now()+timedelta(minutes=4)
+                        logging.info("Waiting 1 minutes for next check...")
+                        time.sleep(60)
+                        curr_image_count = self.get_image_count()
+                        logging.info(f"{image_count} IMAGES TRAINED | {curr_image_count} IMAGES TOTAL")
+                        if curr_image_count > image_count:
+                            self.train_model()
+                            image_count = curr_image_count
+                        sleep_timer = (next_detection_time-datetime.now()).total_seconds()
+                        logging.info(f"Waiting {sleep_timer} seconds for next check...")
+                        time.sleep(sleep_timer)
+                        del curr_image_count
                     else:
                         time.sleep(1)
                 else:
